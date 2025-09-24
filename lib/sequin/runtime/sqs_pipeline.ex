@@ -20,7 +20,9 @@ defmodule Sequin.Runtime.SqsPipeline do
 
     case SqsSink.aws_client(consumer.sink) do
       {:ok, client} ->
-        Map.put(context, :sqs_client, client)
+        context
+        |> Map.put(:sqs_client, client)
+        |> Map.put(:last_credential_refresh, System.system_time(:second))
 
       {:error, reason} ->
         raise "Failed to initialize SQS client: #{inspect(reason)}"
@@ -100,18 +102,38 @@ defmodule Sequin.Runtime.SqsPipeline do
     # Only refresh for task role credentials, as they expire
     # Explicit credentials keep using the same client
     if consumer.sink.use_task_role do
-      case SqsSink.aws_client(consumer.sink) do
-        {:ok, fresh_client} ->
-          Map.put(context, :sqs_client, fresh_client)
+      if should_refresh_credentials?(context) do
+        case SqsSink.aws_client(consumer.sink) do
+          {:ok, fresh_client} ->
+            context
+            |> Map.put(:sqs_client, fresh_client)
+            |> Map.put(:last_credential_refresh, System.system_time(:second))
 
-        {:error, reason} ->
-          # Log but continue (may be transient)
-          Logger.warning("Failed to refresh AWS client for task role: #{inspect(reason)}")
-          context
+          {:error, reason} ->
+            # Log but continue (may be transient)
+            Logger.warning("Failed to refresh AWS client for task role: #{inspect(reason)}")
+            context
+        end
+      else
+        context
       end
     else
       # Not using task roles, no refresh needed
       context
+    end
+  end
+
+  # Check if we should refresh credentials after every 30 mins
+  defp should_refresh_credentials?(context) do
+    case Map.get(context, :last_credential_refresh) do
+      nil ->
+        # Never refreshed, should refresh now
+        true
+
+      last_refresh ->
+        current_time = System.system_time(:second)
+        # Refresh if more than 30 minutes have passed
+        current_time - last_refresh > 1800
     end
   end
 
